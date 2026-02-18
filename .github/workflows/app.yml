@@ -1,7 +1,6 @@
 name: App
 
 on:
-  # 手动触发
   workflow_dispatch:
     inputs:
       build_type:
@@ -18,7 +17,6 @@ on:
         default: false
         type: boolean
   
-  # 保留原有的 push 触发（可选，可以删除如果只想手动触发）
   push:
     paths-ignore:
       - '.github/ISSUE_TEMPLATE'
@@ -34,6 +32,25 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
       
+      - name: Check repository structure
+        run: |
+          echo "Repository structure:"
+          ls -la
+          echo "Checking for api directory:"
+          if [ -d "api" ]; then
+            echo "api directory exists:"
+            ls -la api/
+          else
+            echo "api directory not found!"
+          fi
+          echo "Checking for .gitmodules:"
+          if [ -f ".gitmodules" ]; then
+            echo ".gitmodules found:"
+            cat .gitmodules
+          else
+            echo ".gitmodules not found"
+          fi
+      
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -43,7 +60,6 @@ jobs:
       - name: Write key (only for signed release builds)
         if: github.event.inputs.run_signing == 'true' || (github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master')
         run: |
-          # 只在手动触发且勾选了签名，或者原来的自动触发条件满足时运行
           echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} > signing.properties
           echo KEYSTORE_ALIAS=${{ secrets.KEYSTORE_ALIAS }} >> signing.properties
           echo KEYSTORE_ALIAS_PASSWORD='${{ secrets.KEYSTORE_ALIAS_PASSWORD }}' >> signing.properties
@@ -61,11 +77,17 @@ jobs:
       - name: Build with Gradle
         id: buildWithGradle
         run: |
-          # 接受 Android SDK 许可证（修复管道错误）
+          # 接受 Android SDK 许可证
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
           
-          # 给 gradlew 添加执行权限（修复权限错误）
+          # 给 gradlew 添加执行权限
           chmod +x gradlew
+          
+          # 手动初始化子模块（确保）
+          if [ -f ".gitmodules" ]; then
+            echo "Initializing submodules..."
+            git submodule update --init --recursive
+          fi
           
           # 配置 gradle 属性
           echo 'android.sdk.channel=3' >> gradle.properties
@@ -76,13 +98,13 @@ jobs:
           # 根据输入参数决定构建类型
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           if [ -z "$BUILD_TYPE" ]; then
-            BUILD_TYPE="debug"  # 默认值
+            BUILD_TYPE="debug"
           fi
           
-          # 执行构建（将首字母大写）
-          ./gradlew :manager:assemble$(echo $BUILD_TYPE | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+          # 执行构建
+          ./gradlew :manager:assemble$(echo $BUILD_TYPE | awk '{print toupper(substr($0,1,1)) substr($0,2)}') --stacktrace
           
-          # 提取生成的 APK 名称（用于上传）
+          # 提取生成的 APK 名称
           APK_PATH="manager/build/outputs/apk/$BUILD_TYPE"
           if [ -d "$APK_PATH" ]; then
             APK_FILE=$(ls $APK_PATH/shizuku*-v*-$BUILD_TYPE.apk 2>/dev/null | head -1)
