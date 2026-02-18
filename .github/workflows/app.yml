@@ -1,124 +1,121 @@
-name: App
+name: Android Build
 
 on:
   workflow_dispatch:
     inputs:
       build_type:
-        description: 'Build type (release/debug)'
+        description: Build type
         required: true
-        default: 'debug'
+        default: debug
         type: choice
         options:
           - debug
           - release
       run_signing:
-        description: 'Sign the APK (requires secrets)'
+        description: Sign APK
         required: true
         default: false
         type: boolean
-  
-  push:
-    paths-ignore:
-      - '.github/ISSUE_TEMPLATE'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      #Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          fetch-depth: 0
-      
-      - name: Check repository structure
+
+      # Debug repo structure
+      - name: Debug repo structure
         run: |
-          echo "Repository structure:"
+          pwd
           ls -la
-          echo "Checking for api directory:"
-          if [ -d "api" ]; then
-            echo "api directory exists:"
-            ls -la api/
-          else
-            echo "api directory not found!"
+
+      #Clone Shizuku API
+      - name: Clone Shizuku API
+        run: |
+          if [ ! -d "api" ]; then
+            git clone https://github.com/RikkaApps/Shizuku-api.git api
           fi
-          echo "Checking for .gitmodules:"
-          if [ -f ".gitmodules" ]; then
-            echo ".gitmodules found:"
-            cat .gitmodules
-          else
-            echo ".gitmodules not found"
-          fi
-      
+          ls -la api
+
+      #Setup Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '21'
-      
-      - name: Write key (only for signed release builds)
-        if: github.event.inputs.run_signing == 'true' || (github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master')
+          distribution: temurin
+          java-version: 21
+
+      #Setup Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      #Accept licenses
+      - name: Accept SDK licenses
+        run: |
+          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          elif [ -d "$ANDROID_HOME/cmdline-tools/bin" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/bin/sdkmanager --licenses || true
+          else
+            echo "sdkmanager not found"
+          fi
+
+      #Write signing config
+      - name: Write signing config
+        if: github.event.inputs.run_signing == 'true'
         run: |
           echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} > signing.properties
           echo KEYSTORE_ALIAS=${{ secrets.KEYSTORE_ALIAS }} >> signing.properties
-          echo KEYSTORE_ALIAS_PASSWORD='${{ secrets.KEYSTORE_ALIAS_PASSWORD }}' >> signing.properties
+          echo KEYSTORE_ALIAS_PASSWORD=${{ secrets.KEYSTORE_ALIAS_PASSWORD }} >> signing.properties
           echo KEYSTORE_FILE=../key.jks >> signing.properties
           echo ${{ secrets.KEYSTORE }} | base64 --decode > key.jks
-      
+
+      #Setup Gradle cache
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          dependency-graph: generate-and-submit
-          build-scan-publish: true
-          build-scan-terms-of-use-url: "https://gradle.com/terms-of-service"
-          build-scan-terms-of-use-agree: "yes"
-      
+          cache-read-only: false
+
+      #Build APK
       - name: Build with Gradle
-        id: buildWithGradle
+        id: build
         run: |
-          # 接受 Android SDK 许可证
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
-          
-          # 给 gradlew 添加执行权限
           chmod +x gradlew
-          
-          # 手动初始化子模块（确保）
-          if [ -f ".gitmodules" ]; then
-            echo "Initializing submodules..."
-            git submodule update --init --recursive
-          fi
-          
-          # 配置 gradle 属性
-          echo 'android.sdk.channel=3' >> gradle.properties
-          echo 'android.native.buildOutput=verbose' >> gradle.properties
+
           echo 'org.gradle.caching=true' >> gradle.properties
           echo 'org.gradle.parallel=true' >> gradle.properties
-          
-          # 根据输入参数决定构建类型
+
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           if [ -z "$BUILD_TYPE" ]; then
             BUILD_TYPE="debug"
           fi
-          
-          # 执行构建
-          ./gradlew :manager:assemble$(echo $BUILD_TYPE | awk '{print toupper(substr($0,1,1)) substr($0,2)}') --stacktrace
-          
-          # 提取生成的 APK 名称
+
+          BUILD_CAPITALIZED=$(echo $BUILD_TYPE | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+
+          echo "Building type: $BUILD_CAPITALIZED"
+
+          ./gradlew :manager:assemble$BUILD_CAPITALIZED --stacktrace
+
           APK_PATH="manager/build/outputs/apk/$BUILD_TYPE"
-          if [ -d "$APK_PATH" ]; then
-            APK_FILE=$(ls $APK_PATH/shizuku*-v*-$BUILD_TYPE.apk 2>/dev/null | head -1)
-            if [ -n "$APK_FILE" ]; then
-              releaseName=$(basename "$APK_FILE" .apk)
-              echo "releaseName=$releaseName" >> $GITHUB_OUTPUT
-            fi
+
+          APK_FILE=$(find $APK_PATH -name "*.apk" | head -1)
+
+          if [ -n "$APK_FILE" ]; then
+            releaseName=$(basename "$APK_FILE" .apk)
+            echo "releaseName=$releaseName" >> $GITHUB_OUTPUT
+            echo "Found APK: $APK_FILE"
+          else
+            echo "APK not found!"
+            exit 1
           fi
-      
+
+      # Upload artifact
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.buildWithGradle.outputs.releaseName || 'shizuku-build' }}
-          path: "manager/build/outputs/apk/**/*.apk"
+          name: ${{ steps.build.outputs.releaseName }}
+          path: manager/build/outputs/apk/**/*.apk
           compression-level: 9
           if-no-files-found: error
